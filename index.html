@@ -67,6 +67,11 @@ table.list tr.cur td{background:var(--cur);font-weight:bold}
 table.list td.nm{text-align:left}
 td.miss{color:var(--err)}
 .saved{font-size:16px;color:var(--mut);text-align:right}
+.copy{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:6px 0}
+.copy>button{font-size:21px;min-height:56px;padding:8px 14px}
+.copy.ask{display:block;background:var(--warnbg);border:3px solid var(--warn);border-radius:18px;padding:14px 18px}
+.copy.ask ul{margin:6px 0 10px;padding-left:28px}
+.copy.ask .row button{min-height:70px;font-size:26px}
 @media (max-width:600px){
   body{font-size:20px}
   h1{font-size:30px}
@@ -89,7 +94,7 @@ td.miss{color:var(--err)}
   var st = load() || {};
   st.w = st.w || {}; st.sc = st.sc || {}; if (st.dec == null) st.dec = 0; if (st.speak == null) st.speak = true;
   var WB = null, SH = [], ITEMS = [];
-  var V = { page: 'home', si: 0, item: 'A1', cur: 0, msg: null, heard: '', drop: false };
+  var V = { page: 'home', si: 0, item: 'A1', cur: 0, msg: null, heard: '', drop: false, copyTo: null, undo: null };
   var VO = { rec: null, on: false, want: false, talking: false };
 
   function load() { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { return null; } }
@@ -108,20 +113,20 @@ td.miss{color:var(--err)}
       var ws = wb.Sheets[n]; if (!ws || !ws['!ref']) return;
       var rg = XLSX.utils.decode_range(ws['!ref']);
       var val = function (r, c) { var x = ws[XLSX.utils.encode_cell({ r: r, c: c })]; return x ? x.v : ''; };
-      var cols = {}, zz = -1, seat = -1, nm = -1, cls = -1, subj = -1, key = -1, c;
+      var cols = {}, zz = -1, seat = -1, nm = -1, cls = -1, subj = -1, key = -1, sid = -1, c;
       for (c = rg.s.c; c <= rg.e.c; c++) {
         var h = String(val(rg.s.r, c)).trim(), m = h.match(/^A(\d+)[.．]\s*(.*)$/);
         if (m) { cols['A' + m[1]] = c; if (!items['A' + m[1]]) items['A' + m[1]] = m[2] || ('A' + m[1]); }
         else if (/^ZZ[.．]/.test(h)) zz = c;
         else if (h === '座號') seat = c; else if (h === '姓名') nm = c;
-        else if (h === '班級') cls = c; else if (h === '科目') subj = c; else if (h === '上課學生代碼') key = c;
+        else if (h === '班級') cls = c; else if (h === '科目') subj = c; else if (h === '上課學生代碼') key = c; else if (h === '學號') sid = c;
       }
       if (!Object.keys(cols).length || zz < 0 || seat < 0) return;
       var rows = [], r;
       for (r = rg.s.r + 1; r <= rg.e.r; r++) {
         var se = String(val(r, seat)).trim(), na = nm >= 0 ? String(val(r, nm)).trim() : '';
         if (!se && !na) continue;
-        rows.push({ r: r, key: key >= 0 ? String(val(r, key)).trim() : 'r' + r, seat: se, name: na });
+        rows.push({ r: r, key: key >= 0 ? String(val(r, key)).trim() : 'r' + r, sid: sid >= 0 ? String(val(r, sid)).trim() : '', seat: se, name: na });
       }
       if (!rows.length) return;
       var f = rows[0].r;
@@ -173,6 +178,40 @@ td.miss{color:var(--err)}
   }
   function filled(s, code) { return s.rows.filter(function (row) { return getV(s, row, code) != null; }).length; }
   function seatTxt(row) { var n = parseInt(row.seat, 10); return isNaN(n) ? row.seat : String(n); }
+
+  /* ── 一鍵複製到同班另一科（2026-11-16 瑞媛：國語文學概論和國語文要填一樣的分數）
+     同一位學生在兩科的「上課學生代碼」不同，所以用「學號」對學生；沒有學號才用座號＋姓名。
+     只複製這一班已填的分數；這一班空白的格子，不會去清掉另一科已填的分數。 ── */
+  function sibs(s) { return SH.filter(function (o) { return o !== s && o.cls === s.cls; }); }
+  function idOf(row) { return row.sid ? 'id:' + row.sid : 'sn:' + seatTxt(row) + '|' + row.name; }
+  function copyPlan(src, dst) {
+    var map = {}, p = { add: 0, chg: 0, same: 0, noMatch: [], pairs: [] };
+    src.rows.forEach(function (row) { map[idOf(row)] = row; });
+    dst.rows.forEach(function (d) {
+      var r = map[idOf(d)];
+      if (!r) { p.noMatch.push(seatTxt(d) + ' 號 ' + d.name); return; }
+      ITEMS.forEach(function (it) {
+        if (src.cols[it.code] == null || dst.cols[it.code] == null) return;
+        var v = getV(src, r, it.code), o = getV(dst, d, it.code);
+        if (v == null) return;
+        if (o == null) p.add++; else if (o !== v) p.chg++; else { p.same++; return; }
+        p.pairs.push([d, it.code, v]);
+      });
+    });
+    return p;
+  }
+  function doCopy(src, dst) {
+    var p = copyPlan(src, dst);
+    V.undo = { name: dst.name, data: JSON.stringify(st.sc[dst.name] || {}), label: dst.subj };
+    p.pairs.forEach(function (x) { rec(dst, x[0])[x[1]] = x[2]; });
+    save();
+    return p;
+  }
+  function undoCopy() {
+    if (!V.undo) return;
+    st.sc[V.undo.name] = JSON.parse(V.undo.data); save();
+    V.msg = { k: 'warn', t: '已復原：「' + V.undo.label + '」回到複製前的分數。' }; V.undo = null;
+  }
 
   /* ── 中文數字（沿用成績系統語音登分的寫法） ── */
   var CN_D = { '零': 0, '〇': 0, '一': 1, '壹': 1, '二': 2, '兩': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9 };
@@ -316,6 +355,8 @@ td.miss{color:var(--err)}
     document.getElementById('app').innerHTML = h;
     if (V.page === 'input') {
       var el = document.getElementById('val');
+      var ask = document.querySelector('.copy.ask');
+      if (ask) { ask.scrollIntoView({ block: 'start' }); return; }   /* 複製確認框要看得到，不搶焦點 */
       if (el && !VO.want) { el.focus(); el.select(); }
       /* 名單只在自己的框框裡捲動，大卡片（座號姓名）一定留在畫面上 */
       var box = document.getElementById('lw'), c = document.querySelector('tr.cur'), cd = document.querySelector('.card');
@@ -368,6 +409,7 @@ td.miss{color:var(--err)}
     var s = curSheet(), row = s.rows[V.cur], it = ITEMS.filter(function (x) { return x.code === V.item; })[0] || ITEMS[0];
     var v = getV(s, row, it.code), tot = total(s, row);
     var h = '<div class="bar"><button data-a="classes">← 回班級列表</button><b style="font-size:26px">' + esc(s.cls) + '　' + esc(s.subj) + '</b></div>';
+    h += copyHTML(s);
     h += '<div class="tabs">' + ITEMS.filter(function (x) { return s.cols[x.code] != null; }).map(function (x) {
       return '<button data-a="item|' + x.code + '" class="' + (x.code === it.code ? 'on' : '') + (W(x.code) ? '' : ' zero') + '">' + esc(x.label) + '<br><span class="small">' + filled(s, x.code) + '／' + s.rows.length + '</span></button>';
     }).join('') + '</div>';
@@ -390,6 +432,25 @@ td.miss{color:var(--err)}
       h += '<tr data-a="goto|' + i + '"' + (i === V.cur ? ' class="cur"' : '') + '><td>' + esc(seatTxt(r)) + '</td><td class="nm">' + esc(r.name) + '</td><td' + (x == null ? ' class="miss"' : '') + '>' + (x == null ? '未填' : x) + '</td><td>' + (t == null ? '—' : t) + '</td></tr>';
     });
     return h + '</tbody></table></div>';
+  }
+  function copyHTML(s) {
+    var o = sibs(s); if (!o.length) return '';
+    var t = V.copyTo != null ? SH[V.copyTo] : null;
+    if (!t || o.indexOf(t) < 0) {
+      return '<div class="copy">' + o.map(function (x) {
+        return '<button data-a="copy|' + SH.indexOf(x) + '">📋 把這一班的分數複製到「' + esc(x.subj) + '」</button>';
+      }).join('') + (V.undo ? '<button class="link" data-a="undo">↩ 復原剛才的複製</button>' : '') + '</div>';
+    }
+    var p = copyPlan(s, t), n = p.add + p.chg;
+    var h = '<div class="copy ask"><p style="margin-top:0"><b>把「' + esc(s.cls) + ' ' + esc(s.subj) + '」已經填的分數，<br>複製到「' + esc(t.cls) + ' ' + esc(t.subj) + '」？</b></p>';
+    if (!n) h += '<p>沒有要複製的分數：' + (p.same ? '兩科的分數已經一樣了。' : '這一班還沒有填分數。') + '</p>';
+    else {
+      h += '<ul><li>新填 ' + p.add + ' 格</li>' + (p.chg ? '<li style="color:var(--err)"><b>改掉 ' + p.chg + ' 格</b>（「' + esc(t.subj) + '」原本的分數和這裡不一樣，會換成這裡的）</li>' : '') +
+        (p.same ? '<li>' + p.same + ' 格本來就一樣</li>' : '') + '<li class="small mut">這一班空白的格子不會動到「' + esc(t.subj) + '」。</li></ul>';
+    }
+    if (p.noMatch.length) h += '<p style="color:var(--warn)">這幾位在「' + esc(s.subj) + '」找不到同一個學號，不會複製：' + esc(p.noMatch.join('、')) + '</p>';
+    h += '<div class="row">' + (n ? '<button class="pri grow" data-a="copyok">✓ 確定複製</button>' : '') + '<button class="grow" data-a="copyno">' + (n ? '取消' : '好') + '</button></div></div>';
+    return h;
   }
   function pCheck() {
     var wok = Math.abs(wSum() - 100) < 1e-9, all = 0, done = 0, rows = '';
@@ -432,13 +493,21 @@ td.miss{color:var(--err)}
     else if (t === 'weights') { V.page = 'weights'; V.msg = null; }
     else if (t === 'check') { V.page = 'check'; V.msg = null; }
     else if (t === 'dec') { st.dec = +x; save(); }
-    else if (t === 'open') { V.si = +x; V.cur = 0; V.page = 'input'; V.msg = null; V.heard = ''; V.item = (ITEMS.filter(function (it) { return W(it.code) && SH[V.si].cols[it.code] != null; })[0] || ITEMS[0]).code; }
+    else if (t === 'open') { V.si = +x; V.cur = 0; V.undo = null; V.page = 'input'; V.msg = null; V.heard = ''; V.item = (ITEMS.filter(function (it) { return W(it.code) && SH[V.si].cols[it.code] != null; })[0] || ITEMS[0]).code; }
     else if (t === 'item') { V.item = x; V.cur = 0; V.msg = null; if (VO.want) announce(); }
     else if (t === 'goto') { V.cur = +x; V.msg = null; }
     else if (t === 'prev') { go(-1); V.msg = null; }
     else if (t === 'ok') { keyEnter(); return; }
     else if (t === 'mic') { if (VO.want) { voStop(); V.msg = null; } else { voStart(); return; } }
     else if (t === 'dl') { download(); V.msg = { k: 'ok', t: '已下載「' + outName() + '」。' }; }
+    else if (t === 'copy') { V.copyTo = +x; V.msg = null; }
+    else if (t === 'copyno') { V.copyTo = null; }
+    else if (t === 'copyok') {
+      var src = curSheet(), dst = SH[V.copyTo]; V.copyTo = null;
+      if (dst) { var p = doCopy(src, dst); V.msg = { k: 'ok', t: '✓ 已複製到「' + dst.cls + ' ' + dst.subj + '」：新填 ' + p.add + ' 格' + (p.chg ? '、改掉 ' + p.chg + ' 格' : '') + '。' }; }
+    }
+    else if (t === 'undo') { undoCopy(); }
+    if (t !== 'copy') V.copyTo = null;
     render();
   });
   document.addEventListener('change', function (ev) { if (ev.target.id === 'file') openFile(ev.target.files[0]); });
